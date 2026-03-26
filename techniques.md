@@ -35,39 +35,48 @@ Chronological path from baseline to SOTA. Each row shows the cumulative score, i
 
 ### Layer Count: 9 → 11 layers
 - **Impact:** ~-0.012 BPB (going from 9L to 11L)
-- **Notes:** More layers requires int6 quantization to stay under 16MB. 10L is a safe middle ground; 11L needs aggressive quantization (mixed int5/int6) and careful size budgeting. Demonstrated at 1.1307 submission.
+- **Notes:** More layers requires int6 quantization to stay under 16MB. 10L is a safe middle ground; 11L needs aggressive quantization (mixed int5/int6) and careful size budgeting.
+- **Refs:** `2026-03-19_SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit` (10L), `2026-03-20_11L_EfficientPartialXSA_FA3_SWA120` (11L)
 
 ### MLP Expansion: 2x → 3x
 - **Impact:** ~-0.005 to -0.010 BPB
-- **Notes:** Hidden dim 1536 (3x of 512d). Major capacity boost. Combined with int6 quant to fit. Demonstrated at 1.1630 submission. Ensure size budget allows it.
+- **Notes:** Hidden dim 1536 (3x of 512d). Major capacity boost. Combined with int6 quant to fit. Ensure size budget allows it.
+- **Refs:** `2026-03-19_MLP3x_QAT_Int6_SlidingWindow`
 
 ### U-Net Skip Connections
 - **Impact:** ~-0.002 to -0.005 BPB (architecture-dependent)
-- **Notes:** Encoder/decoder structure with learned skip weights connecting symmetric layers. Adds minimal parameters. Most effective with deeper networks (10L+). Used in the ternary submission (1.1570).
+- **Notes:** Encoder/decoder structure with learned skip weights connecting symmetric layers. Adds minimal parameters. Most effective with deeper networks (10L+). Used in submissions at 1.1307, 1.1248, 1.1233, and SOTA (1.1194).
+- **Refs:** `2026-03-20_11L_EfficientPartialXSA_FA3_SWA120`, `2026-03-21_11L_XSA4_EMA_PartialRoPE_LateQAT_1.1248`, `2026-03-22_11L_EMA_GPTQ-lite_warmdown3500_QAT015_1.1233`, `2026-03-23_LeakyReLU_LegalTTT_ParallelMuon`
 
 ### Exclusive Self Attention (XSA) — Last 3-4 Layers
 - **Impact:** ~-0.012 BPB (3 layers), ~-0.004 BPB additional (4th layer)
-- **Notes:** Replaces standard attention in final layers. Each head attends to a distinct subset of positions, reducing redundancy. Apply to last 3-4 layers only; applying to all layers hurts. "Efficient Partial XSA" variant reduces compute. Demonstrated at 1.1307 (3 layers) and 1.1271 (4 layers).
+- **Notes:** After standard attention, subtract the component aligned with the token's own value vector. Reduces self-attention bias. Apply only to last 3-4 layers; applying to all layers hurts.
+- **Refs:** `2026-03-20_11L_EfficientPartialXSA_FA3_SWA120` (3 layers), `2026-03-20_11L_XSA4_EMA_Int6_MLP3x_WD04_1.1271` (4 layers)
 
 ### Partial RoPE (16/64 dims)
 - **Impact:** ~-0.002 BPB
-- **Notes:** Apply rotary position embeddings to only 16 out of 64 head dimensions instead of all. Remaining dims use NoPE (no positional encoding). Reduces over-reliance on position. Demonstrated at 1.1248.
+- **Notes:** Apply rotary position embeddings to only 16 out of 64 head dimensions instead of all. Remaining dims use NoPE (no positional encoding). Reduces over-reliance on position.
+- **Refs:** `2026-03-21_11L_XSA4_EMA_PartialRoPE_LateQAT_1.1248`
 
 ### LN Scale: 1/sqrt(layer_idx + 1)
 - **Impact:** ~-0.001 to -0.002 BPB (combined with Partial RoPE)
-- **Notes:** Scale LayerNorm output by `1/sqrt(layer_idx + 1)` where `layer_idx` is 0-indexed. Dampens signal magnitude in deeper layers, stabilizing training. Simple one-line change. Demonstrated at 1.1248.
+- **Notes:** Scale LayerNorm output by `1/sqrt(layer_idx + 1)` where `layer_idx` is 0-indexed. Dampens signal magnitude in deeper layers, stabilizing training. Simple one-line change.
+- **Refs:** `2026-03-21_11L_XSA4_EMA_PartialRoPE_LateQAT_1.1248`
 
 ### SmearGate
 - **Impact:** ~-0.003 to -0.005 BPB
-- **Notes:** Learned gate that blends the current token representation with the previous token's representation before attention. Adds a small linear layer per block to produce a gate value. Helps capture local context cheaply. Demonstrated at 1.1556.
+- **Notes:** Learned per-dimension gate blending current token embedding with previous token. Initialized near identity (sigmoid(3.0) ~ 0.95). Injects bigram context at the embedding layer.
+- **Refs:** `2026-03-19_int6_STE QAT_ MLP_bigram _U_Net`
 
 ### BigramHash
 - **Impact:** ~-0.003 to -0.005 BPB
-- **Notes:** Hash consecutive token pairs into learned embedding buckets (2048-10240 buckets). Added to the input embeddings. Captures bigram statistics without a full bigram table. More buckets generally better up to ~10240. Demonstrated at 1.1556 (2048 buckets) and improved at 1.1428 (10240 buckets).
+- **Notes:** Hash consecutive token pairs via `(prev_token * 92821 + curr_token) % num_buckets` into learned embedding buckets (2048-10240 buckets). Added to the input embeddings. Captures bigram statistics without a full bigram table. More buckets generally better up to ~10240.
+- **Refs:** `2026-03-19_int6_STE QAT_ MLP_bigram _U_Net` (2048 buckets), `2026-03-20_10L_Int5MLP_MuonWD04_SWA50` (10240 buckets)
 
 ### LeakyReLU(0.5)^2 Activation
 - **Impact:** ~-0.002 BPB
-- **Notes:** Replace the MLP activation with `LeakyReLU(negative_slope=0.5)` followed by squaring. One-line change. Outperforms SwiGLU and standard ReLU^2 in this constrained setting. Demonstrated at 1.1194.
+- **Notes:** Replace the MLP activation with `LeakyReLU(negative_slope=0.5)` followed by squaring. One-line change. Outperforms SwiGLU and standard ReLU^2 in this constrained setting.
+- **Refs:** `2026-03-23_LeakyReLU_LegalTTT_ParallelMuon`
 
 ### Value Embedding
 - **Impact:** ~-0.001 to -0.002 BPB (exploratory)
@@ -79,27 +88,33 @@ Chronological path from baseline to SOTA. Each row shows the cumulative score, i
 
 ### Int6 STE QAT (Straight-Through Estimator)
 - **Impact:** Eliminates ~0.005-0.010 BPB quantization gap
-- **Notes:** Quantize weights to 6-bit during training using straight-through estimator for gradients. Range [-31, 31]. Model learns to be robust to quantization. Essential for fitting 10L+ models under 16MB. Demonstrated at 1.1556.
+- **Notes:** Quantize weights to 6-bit during training using straight-through estimator for gradients. Range [-31, 31]. Model learns to be robust to quantization. Essential for fitting 10L+ models under 16MB.
+- **Refs:** `2026-03-19_int6_STE QAT_ MLP_bigram _U_Net`
 
 ### Mixed Int5/Int6 Quantization
 - **Impact:** Saves ~0.5-1MB vs uniform int6, enabling more layers
-- **Notes:** Use int5 for MLP weights (more tolerant of lower precision), int6 for attention weights (more sensitive). Enables 11L models to fit. Demonstrated at 1.1428.
+- **Notes:** Use int5 for MLP weights (more tolerant of lower precision), int6 for attention weights (more sensitive). Enables 11L models to fit.
+- **Refs:** `2026-03-20_10L_Int5MLP_MuonWD04_SWA50`
 
 ### GPTQ-lite Clip Search
 - **Impact:** ~-0.001 to -0.002 BPB
-- **Notes:** Per-row percentile-based clip search for quantization ranges. Zero training cost — applied post-training. Searches for optimal clipping percentile per weight row to minimize quantization error. Demonstrated at 1.1233.
+- **Notes:** Per-row percentile-based clip search for quantization ranges. Zero training cost -- applied post-training. Searches for optimal clipping percentile per weight row to minimize quantization error.
+- **Refs:** `2026-03-22_11L_EMA_GPTQ-lite_warmdown3500_QAT015_1.1233`
 
 ### FP16 Tied Embedding
 - **Impact:** ~-0.002 to -0.003 BPB
-- **Notes:** Keep the tied embedding/unembedding matrix in FP16 instead of quantizing it. Embeddings are highly sensitive to quantization noise. Uses more size budget but improves quality significantly. Demonstrated at 1.1748.
+- **Notes:** Keep the tied embedding/unembedding matrix in FP16 instead of quantizing it. Embeddings are highly sensitive to quantization noise. Uses more size budget but improves quality significantly.
+- **Refs:** `2026-03-19_SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit`
 
 ### zstd-22 Compression
 - **Impact:** Saves ~1.5MB vs zlib-9
-- **Notes:** Use zstd at compression level 22 instead of zlib-9 for the final artifact. Better compression ratio frees space for more parameters or higher-precision weights. Demonstrated at 1.1556.
+- **Notes:** Use zstd at compression level 22 instead of zlib-9 for the final artifact. Better compression ratio frees space for more parameters or higher-precision weights.
+- **Refs:** `2026-03-19_int6_STE QAT_ MLP_bigram _U_Net`
 
 ### Late QAT (Enable STE When LR Scale < 0.15)
 - **Impact:** ~-0.001 BPB (vs early QAT)
-- **Notes:** Only enable straight-through quantization simulation late in training, when learning rate scale drops below 0.15. Allows the model to learn freely early, then adapt to quantization constraints during fine-tuning. Demonstrated at 1.1233.
+- **Notes:** Only enable straight-through quantization simulation late in training, when learning rate scale drops below 0.15. Allows the model to learn freely early, then adapt to quantization constraints during fine-tuning.
+- **Refs:** `2026-03-22_11L_EMA_GPTQ-lite_warmdown3500_QAT015_1.1233`
 
 ---
 
@@ -107,19 +122,23 @@ Chronological path from baseline to SOTA. Each row shows the cumulative score, i
 
 ### Muon Weight Decay 0.04
 - **Impact:** ~-0.003 to -0.005 BPB
-- **Notes:** Decoupled weight decay at 0.04 with Muon optimizer. Produces tighter weight distributions that quantize better. Higher than typical values but validated. Demonstrated at 1.1458.
+- **Notes:** Decoupled weight decay at 0.04 with Muon optimizer. Produces tighter weight distributions that quantize better.
+- **Refs:** `2026-03-20_Int6_MLP3x_SmearGate_BigramHash_MuonWD_SWA`
 
 ### Warmdown 3000-3500 Iters
 - **Impact:** ~-0.001 to -0.002 BPB
-- **Notes:** Linear LR decay to zero over the final 3000-3500 iterations. Longer warmdown (3500) slightly better than shorter (3000). Produces tighter final weight distributions. Demonstrated at 1.1233.
+- **Notes:** Linear LR decay to zero over the final 3000-3500 iterations. Longer warmdown (3500) slightly better than shorter (3000). Produces tighter final weight distributions.
+- **Refs:** `2026-03-22_11L_EMA_GPTQ-lite_warmdown3500_QAT015_1.1233`
 
 ### Learning Rate Tuning
 - **Impact:** ~-0.002 to -0.005 BPB (from default)
-- **Notes:** `MATRIX_LR=0.02-0.025` for Muon-optimized parameters, `TIED_EMBED_LR=0.03-0.035` for the tied embedding. These are higher than typical defaults. Sensitive to other hyperparameters; tune carefully.
+- **Notes:** `MATRIX_LR=0.02-0.025` for Muon-optimized parameters, `TIED_EMBED_LR=0.03-0.035` for the tied embedding. These are lower than the default of 0.04. Sensitive to other hyperparameters; tune carefully.
+- **Refs:** `2026-03-19_Seq2048_FP16Emb_TunedLR`
 
 ### Muon Momentum 0.99 with Warmup
 - **Impact:** ~-0.002 to -0.004 BPB
-- **Notes:** Set Muon momentum to 0.99 (higher than default). Warm up from 0.92 to 0.99 over the first 1500 steps. Stabilizes early training while allowing aggressive optimization later. Demonstrated at 1.2014.
+- **Notes:** Set Muon momentum to 0.99 (higher than default). Warm up from 0.92 to 0.99 over the first 1500 steps. Stabilizes early training while allowing aggressive optimization later.
+- **Refs:** `2026-03-19_TrainingOptSeq4096`
 
 ### Gradient Clipping (GRAD_CLIP_NORM=0.3)
 - **Impact:** Training stability (prevents divergence)
@@ -127,7 +146,8 @@ Chronological path from baseline to SOTA. Each row shows the cumulative score, i
 
 ### Sequence Length 2048
 - **Impact:** ~-0.019 BPB
-- **Notes:** Increase from 1024 to 2048. Significantly better learning signal from longer context. ~1.6x slower per step but well worth it. Going to 4096 gives diminishing returns (~-0.004 more) and is much slower. Demonstrated at 1.2058.
+- **Notes:** Increase from 1024 to 2048. Significantly better learning signal from longer context. ~1.6x slower per step but well worth it. Going to 4096 gives diminishing returns (~-0.004 more) and is much slower.
+- **Refs:** `2026-03-18_LongContextSeq2048`
 
 ### Batch Size Tuning (786432 Tokens)
 - **Impact:** ~-0.001 to -0.003 BPB
@@ -135,7 +155,8 @@ Chronological path from baseline to SOTA. Each row shows the cumulative score, i
 
 ### Orthogonal Initialization + muP-Scaled Outputs
 - **Impact:** ~-0.002 to -0.003 BPB
-- **Notes:** Initialize weight matrices with orthogonal init. Scale output projections following muP (maximal update parameterization) principles. Improves training dynamics, especially with deeper networks. Demonstrated at 1.1748.
+- **Notes:** Initialize weight matrices with orthogonal init. Scale output projections following muP (maximal update parameterization) principles. Improves training dynamics, especially with deeper networks.
+- **Refs:** `2026-03-19_SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit`
 
 ---
 
@@ -143,15 +164,18 @@ Chronological path from baseline to SOTA. Each row shows the cumulative score, i
 
 ### EMA (Exponential Moving Average)
 - **Impact:** ~-0.002 to -0.004 BPB
-- **Notes:** Decay=0.997, update every step. Preferred over SWA for simplicity and slightly better results. Use the EMA weights for final evaluation and export. Demonstrated at 1.1271.
+- **Notes:** Decay=0.997, update every step. Preferred over SWA for simplicity and slightly better results. Use the EMA weights for final evaluation and export.
+- **Refs:** `2026-03-20_11L_XSA4_EMA_Int6_MLP3x_WD04_1.1271`
 
 ### SWA (Stochastic Weight Averaging)
 - **Impact:** ~-0.002 to -0.004 BPB
-- **Notes:** Average checkpoints every 50 steps over the last 40-50% of warmdown. Superseded by EMA (which is simpler and equally effective). Still valid if EMA is not implemented. Demonstrated at 1.1458.
+- **Notes:** Average checkpoints every 50 steps over the last 40-50% of warmdown. Superseded by EMA (which is simpler and equally effective). Still valid if EMA is not implemented.
+- **Refs:** `2026-03-20_Int6_MLP3x_SmearGate_BigramHash_MuonWD_SWA`
 
 ### Sliding Window Evaluation (stride=64)
 - **Impact:** ~-0.025 to -0.035 BPB (pure eval improvement)
-- **Notes:** At evaluation time, use overlapping windows with stride=64 instead of non-overlapping chunks. Each token is predicted using maximum available context. Eval-only change, no training cost. Large free improvement. Demonstrated at 1.1925.
+- **Notes:** At evaluation time, use overlapping windows with stride=64 instead of non-overlapping chunks. Each token is predicted using maximum available context. Eval-only change, no training cost. Large free improvement.
+- **Refs:** `2026-03-19_SlidingWindowEval`
 
 ### Temperature Scaling (T=0.90)
 - **Impact:** ~-0.001 to -0.002 BPB (with extreme quantization)
@@ -163,19 +187,23 @@ Chronological path from baseline to SOTA. Each row shows the cumulative score, i
 
 ### Legal TTT (Test-Time Training)
 - **Impact:** ~-0.002 to -0.005 BPB
-- **Notes:** Score-first, backward-looking test-time training. At eval time, adapt model parameters using SGD on previously seen tokens (backward-looking only, so it's "legal" — no data leakage). Uses the eval data itself for adaptation. Adds ~410s to eval time but stays within competition rules. Demonstrated at 1.1194.
+- **Notes:** Score-first, backward-looking test-time training. At eval time, adapt model parameters using SGD on previously seen tokens (backward-looking only, so it's "legal" -- no data leakage). Uses the eval data itself for adaptation. Adds ~410s to eval time but stays within competition rules.
+- **Refs:** `2026-03-23_LeakyReLU_LegalTTT_ParallelMuon`
 
 ### Parallel Muon (Batched Newton-Schulz)
 - **Impact:** Training speed improvement (same BPB)
-- **Notes:** Batch the Newton-Schulz iterations in Muon optimizer across parameter groups. Reduces wall-clock training time without affecting convergence. Useful for running more experiments in fixed time budget. Demonstrated at 1.1194.
+- **Notes:** Batch the Newton-Schulz iterations in Muon optimizer across parameter groups. Reduces wall-clock training time without affecting convergence. Useful for running more experiments in fixed time budget.
+- **Refs:** `2026-03-23_LeakyReLU_LegalTTT_ParallelMuon`
 
 ### Ternary Quantization (BitNet b1.58)
 - **Impact:** 1.1570 BPB with 73M+ params
 - **Notes:** Quantize all weights to {-1, 0, +1}. Enables dramatically more parameters (73M+) within 16MB. Currently behind int6 approaches but has theoretical upside with more optimization. Interesting research direction.
+- **Refs:** `2026-03-24_74M_Ternary_UNet_FP8_10L_8192BPE_YaRN_NeoMuon`
 
 ### LoRA TTT
 - **Impact:** ~-0.001 to -0.003 BPB (older estimate)
 - **Notes:** Low-rank adaptation at test time. Superseded by Legal TTT which is simpler and more effective. Mentioned for completeness.
+- **Refs:** `2026-03-17_LoRA_TTT`
 
 ---
 
@@ -198,12 +226,12 @@ Complete list of techniques in the best submission:
 - Partial RoPE (16/64 dims)
 - LN Scale (1/sqrt(layer_idx+1))
 - SmearGate
-- BigramHash (10240 buckets)
+- BigramHash (1536 buckets)
 - Mixed int5/int6 quantization (int5 MLP, int6 attention)
 - Int6 STE QAT with late enable (threshold 0.15)
 - GPTQ-lite clip search post-training
 - FP16 tied embedding
-- zstd-22 compression
+- lzma compression
 - Muon optimizer (LR 0.02-0.025, momentum 0.99, WD 0.04)
 - Warmdown 3500 iters
 - Orthogonal init + muP-scaled outputs
