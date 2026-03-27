@@ -87,6 +87,7 @@ class Hyperparameters:
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
     muon_wd = float(os.environ.get("MUON_WD", 0.04))
     eval_stride = int(os.environ.get("EVAL_STRIDE", 128))
+    xsa_last_n = int(os.environ.get("XSA_LAST_N", 3))
     eval_batch_seqs = int(os.environ.get("EVAL_BATCH_SEQS", 16))
 
 # -----------------------------
@@ -599,6 +600,7 @@ class CausalSelfAttention(nn.Module):
         self.proj._zero_init = True
         self.q_gain = nn.Parameter(torch.full((num_heads,), qk_gain_init, dtype=torch.float32))
         self.rotary = Rotary(self.head_dim, base=rope_base)
+        self.use_xsa = False
 
     def forward(self, x: Tensor) -> Tensor:
         bsz, seqlen, dim = x.shape
@@ -619,6 +621,15 @@ class CausalSelfAttention(nn.Module):
             is_causal=True,
             enable_gqa=(self.num_kv_heads != self.num_heads),
         )
+        if self.use_xsa:
+            # Subtract self-value projection (GQA-aware)
+            B, Hq, T, D = y.shape
+            Hkv = v.size(1)
+            group = Hq // Hkv
+            y_g = y.reshape(B, Hkv, group, T, D)
+            vn = F.normalize(v, dim=-1).unsqueeze(2)
+            proj = (y_g * vn).sum(dim=-1, keepdim=True) * vn
+            y = (y_g - proj).reshape(B, Hq, T, D)
         y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
         return self.proj(y)
 
@@ -679,6 +690,7 @@ class GPT(nn.Module):
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
+        xsa_last_n: int = 0,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -704,6 +716,9 @@ class GPT(nn.Module):
                 for i in range(num_layers)
             ]
         )
+        if xsa_last_n > 0:
+            for i in range(max(0, num_layers - xsa_last_n), num_layers):
+                self.blocks[i].attn.use_xsa = True
         self.final_norm = RMSNorm()
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
@@ -948,6 +963,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
+        xsa_last_n=args.xsa_last_n,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
