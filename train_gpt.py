@@ -86,7 +86,7 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
     muon_wd = float(os.environ.get("MUON_WD", 0.04))
-    eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
+    eval_stride = int(os.environ.get("EVAL_STRIDE", 128))
     xsa_last_n = int(os.environ.get("XSA_LAST_N", 3))
     eval_batch_seqs = int(os.environ.get("EVAL_BATCH_SEQS", 16))
 
@@ -329,13 +329,21 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     t32 = t.float()
     if t32.ndim == 2:
-        # Int6 per-row quantization: range [-31, 31] (63 levels) — much better
-        # compression ratio than int8 with minimal quality loss when QAT is used.
+        # GPTQ-lite: test multiple clip percentiles per row, pick lowest MSE
         clip_range = 31
-        row_clip = t32.abs().amax(dim=1)
-        scale = (row_clip / clip_range).clamp_min(1.0 / clip_range)
-        q = torch.clamp(torch.round(t32 / scale[:, None]), -clip_range, clip_range).to(torch.int8).contiguous()
-        return q, scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
+        best_q, best_s, best_err = None, None, float("inf")
+        for pct in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
+            if pct < 1.0:
+                row_clip = torch.quantile(t32.abs(), pct, dim=1)
+            else:
+                row_clip = t32.abs().amax(dim=1)
+            s = (row_clip / clip_range).clamp_min(1.0 / clip_range).to(torch.float16)
+            q = torch.clamp(torch.round(t32 / s.float()[:, None]), -clip_range, clip_range).to(torch.int8)
+            recon = q.float() * s.float()[:, None]
+            err = (t32 - recon).pow(2).mean().item()
+            if err < best_err:
+                best_q, best_s, best_err = q.contiguous(), s.contiguous(), err
+        return best_q, best_s
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item()) if t32.numel() else 0.0
