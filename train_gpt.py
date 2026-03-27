@@ -86,7 +86,7 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
     muon_wd = float(os.environ.get("MUON_WD", 0.04))
-    eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
+    eval_stride = int(os.environ.get("EVAL_STRIDE", 128))
     eval_batch_seqs = int(os.environ.get("EVAL_BATCH_SEQS", 16))
 
 # -----------------------------
@@ -328,16 +328,12 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
 def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     t32 = t.float()
     if t32.ndim == 2:
-        # Matrices get one scale per row, which usually tracks output-channel
-        # ranges much better than a single tensor-wide scale.
-        clip_abs = (
-            torch.quantile(t32.abs(), INT8_CLIP_Q, dim=1)
-            if t32.numel()
-            else torch.empty((t32.shape[0],), dtype=torch.float32)
-        )
-        clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
-        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-        q = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8).contiguous()
+        # Int6 per-row quantization: range [-31, 31] (63 levels) — much better
+        # compression ratio than int8 with minimal quality loss when QAT is used.
+        clip_range = 31
+        row_clip = t32.abs().amax(dim=1)
+        scale = (row_clip / clip_range).clamp_min(1.0 / clip_range)
+        q = torch.clamp(torch.round(t32 / scale[:, None]), -clip_range, clip_range).to(torch.int8).contiguous()
         return q, scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
 
     # Vectors / scalars use a simpler per-tensor scale.
@@ -523,7 +519,16 @@ class RMSNorm(nn.Module):
 
 class CastedLinear(nn.Linear):
     # Keep weights in fp32 for optimizer/state quality, cast at matmul time for bf16 compute.
+    _qat: bool = False
+
     def forward(self, x: Tensor) -> Tensor:
+        w = self.weight
+        if self._qat and self.training and w.ndim == 2:
+            w_f = w.float()
+            amax = w_f.abs().amax(dim=-1, keepdim=True).clamp_min(1e-12)
+            scale = amax / 31.0
+            q = (w_f / scale).round().clamp(-31, 31) * scale
+            w = w + (q - w_f).detach()  # STE: forward sees quantized, backward sees original
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, self.weight.to(x.dtype), bias)
 
@@ -947,6 +952,7 @@ def main() -> None:
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
             module.float()
+            module._qat = True  # Enable int6 STE QAT
     restore_low_dim_params_to_fp32(base_model)
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
