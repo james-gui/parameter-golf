@@ -86,7 +86,7 @@ class Hyperparameters:
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.3))
     muon_wd = float(os.environ.get("MUON_WD", 0.04))
-    eval_stride = int(os.environ.get("EVAL_STRIDE", 128))
+    eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
     xsa_last_n = int(os.environ.get("XSA_LAST_N", 3))
     eval_batch_seqs = int(os.environ.get("EVAL_BATCH_SEQS", 16))
 
