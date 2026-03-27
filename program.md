@@ -25,22 +25,22 @@ You are an autonomous research agent running an experiment loop on the **paramet
    ls ./data/tokenizers/fineweb_1024_bpe.model
    ```
 
-7. **Run baseline** to establish your local reference score:
+7. **Run baseline** to establish your local reference score. Training takes ~12 minutes (10 min train + eval + serialization), so you MUST run it in the background and poll for completion:
    ```bash
-   RUN_ID=baseline \
-   DATA_PATH=./data/datasets/fineweb10B_sp1024 \
-   TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
-   VOCAB_SIZE=1024 \
-   torchrun --standalone --nproc_per_node=1 train_gpt.py > run.log 2>&1
+   nohup bash -c 'RUN_ID=baseline DATA_PATH=./data/datasets/fineweb10B_sp1024 TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model VOCAB_SIZE=1024 torchrun --standalone --nproc_per_node=1 train_gpt.py > run.log 2>&1' &
    ```
-   Then extract results:
+   Then poll every 60 seconds until `run.log` contains `final_int8_zlib_roundtrip`:
    ```bash
-   grep "^val_bpb\|^final_int8_zlib_roundtrip\|quant_file_bytes\|peak_memory" run.log
+   tail -3 run.log
+   ```
+   Once complete, extract results:
+   ```bash
+   grep "final_int8_zlib_roundtrip\|Total submission size\|peak memory" run.log
    ```
 
 8. **Initialize `results.tsv`** with the header and the baseline row (see Results Logging below).
 
-9. **Confirm with the user**, then begin the experiment loop.
+9. **Begin the experiment loop immediately.** Do not wait for user confirmation — the human may be away.
 
 ---
 
@@ -48,15 +48,13 @@ You are an autonomous research agent running an experiment loop on the **paramet
 
 ### Run command template
 
-Every experiment uses this exact command, only changing `RUN_ID`:
+Every experiment uses this command template, only changing `RUN_ID`. Always run in background via `nohup` and poll for completion — training takes ~12 minutes which exceeds the Bash tool timeout:
 
 ```bash
-RUN_ID=exp_<N> \
-DATA_PATH=./data/datasets/fineweb10B_sp1024 \
-TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
-VOCAB_SIZE=1024 \
-torchrun --standalone --nproc_per_node=1 train_gpt.py > run.log 2>&1
+nohup bash -c 'RUN_ID=exp_<N> DATA_PATH=./data/datasets/fineweb10B_sp1024 TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model VOCAB_SIZE=1024 torchrun --standalone --nproc_per_node=1 train_gpt.py > run.log 2>&1' &
 ```
+
+Poll with `tail -3 run.log` every 60 seconds until `final_int8_zlib_roundtrip` appears.
 
 ### What you CAN do
 
@@ -75,7 +73,7 @@ Achieve the **lowest `val_bpb`** with a final artifact **<= 16,000,000 bytes** (
 ### Constraints checked every run
 
 1. **`val_bpb`** — the post-quantization bits-per-byte on the validation set. Lower is better.
-2. **Artifact size** — `quant_file_bytes` from the log. Must be <= 16,000,000 bytes.
+2. **Artifact size** — `Total submission size int8+zlib` from the log. Must be <= 16,000,000 bytes.
 
 ### Simplicity criterion
 
@@ -120,20 +118,20 @@ Print a **"best so far"** summary showing the lowest `val_bpb` achieved, its com
    ```bash
    git add train_gpt.py && git commit -m "experiment: <description>"
    ```
-4. **Run** the experiment:
+4. **Run** the experiment. Training takes ~12 minutes, which exceeds the Bash tool timeout. You MUST run in background and poll:
    ```bash
-   RUN_ID=exp_<N> \
-   DATA_PATH=./data/datasets/fineweb10B_sp1024 \
-   TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
-   VOCAB_SIZE=1024 \
-   torchrun --standalone --nproc_per_node=1 train_gpt.py > run.log 2>&1
+   nohup bash -c 'RUN_ID=exp_<N> DATA_PATH=./data/datasets/fineweb10B_sp1024 TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model VOCAB_SIZE=1024 torchrun --standalone --nproc_per_node=1 train_gpt.py > run.log 2>&1' &
    ```
+   Poll every 60 seconds with `tail -3 run.log` until you see `final_int8_zlib_roundtrip`. Do NOT proceed until the run has fully completed.
 5. **Extract results:**
    ```bash
-   grep "^val_bpb\|^final_int8_zlib_roundtrip\|quant_file_bytes\|peak_memory" run.log
+   grep "final_int8_zlib_roundtrip\|Total submission size\|peak memory" run.log
    ```
-6. **Gate check:** If `quant_file_bytes` > 16,000,000 → treat as failure regardless of `val_bpb`.
-7. **If improved AND fits** → mark `keep`, advance the branch (leave the commit in place).
+6. **Gate check:** If `Total submission size int8+zlib` > 16,000,000 → treat as failure regardless of `val_bpb`.
+7. **If improved AND fits** → mark `keep`, push to fork, advance the branch:
+   ```bash
+   git push origin HEAD
+   ```
 8. **If worse or over budget** → mark `discard`, revert:
    ```bash
    git reset --hard HEAD~1
@@ -163,13 +161,13 @@ Print a **"best so far"** summary showing the lowest `val_bpb` achieved, its com
 Every ~10 experiments, fetch the latest leaderboard to check for new ideas:
 
 ```bash
-gh api repos/openai/parameter-golf/contents/README.md --jq '.content' | base64 -d | head -60
+curl -sL https://raw.githubusercontent.com/openai/parameter-golf/main/README.md | head -60
 ```
 
 If you see new submissions, read their READMEs:
 
 ```bash
-gh api repos/openai/parameter-golf/contents/records/track_10min_16mb/<folder>/README.md --jq '.content' | base64 -d
+curl -sL https://raw.githubusercontent.com/openai/parameter-golf/main/records/track_10min_16mb/<folder>/README.md
 ```
 
 Incorporate any new techniques into your prioritized experiment list.
@@ -197,7 +195,6 @@ Priority order from highest to lowest. Start at the top; work down.
 
 ### 3. Architecture changes
 - 3x MLP expansion
-- U-Net skip connections
 - XSA (cross-sequence attention) on last N layers
 - SmearGate + BigramHash
 - Partial RoPE (subset of head dims)
